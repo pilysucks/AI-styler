@@ -6,6 +6,7 @@ from typing import Dict, List
 import pandas as pd
 import streamlit as st
 
+from services import deepseek
 from services import inventory
 from services import recommendations
 
@@ -33,6 +34,7 @@ def _init_state() -> None:
             "include_musinsa": True,
             "include_kream": True,
             "per_category_cap": None,
+            "refresh_static": True,
         }
     if "integrations" not in st.session_state:
         st.session_state.integrations = {
@@ -94,30 +96,69 @@ def _render_outfit_card(outfit: Dict) -> None:
                     st.write(" · ".join(meta))
 
 
-def _render_recommendation_detail(item: Dict) -> None:
-    st.markdown(f"### {item['name']}")
+def _render_product_card(item: Dict) -> None:
     if item.get("image_url"):
-        st.image(item["image_url"], width=320)
-    st.write(item["reason"])
+        st.image(item["image_url"], use_column_width=True)
+
+    st.markdown(f"**{item['name']}**")
+
     price = item.get("price_krw")
     if price:
-        st.metric("가격", f"{price:,.0f}원")
+        st.write(f"{price:,.0f}원")
+
+    meta_parts = []
+    if item.get("source"):
+        meta_parts.append(item["source"])
+    if item.get("score") is not None:
+        meta_parts.append(f"점수 {item['score']:.2f}")
+    if meta_parts:
+        st.caption(" · ".join(meta_parts))
+
+    if item.get("reason"):
+        st.caption(item["reason"])
+
+    caption = None
+    if deepseek.is_configured():
+        caption = deepseek.product_caption(
+            name=item.get("name", ""),
+            price_krw=item.get("price_krw"),
+            style_tags=item.get("style_tags", []),
+            source=item.get("source"),
+        )
+    if caption:
+        st.write(caption)
+
     if item.get("style_tags"):
         st.caption(f"스타일: {', '.join(item['style_tags'])}")
-    if item.get("season"):
-        st.caption(f"시즌: {', '.join(item['season'])}")
+
     st.link_button("구매하러 가기", item["product_url"], type="primary")
 
-    st.divider()
-    st.markdown("**이 아이템으로 완성하는 코디**")
-    for idx, outfit in enumerate(item.get("outfit_example", []), start=1):
-        with st.expander(f"코디 아이디어 #{idx}"):
-            for piece in outfit:
-                if isinstance(piece, dict) and piece.get("name"):
-                    line = f"- {piece['category'] if piece.get('category') else '아이템'} | {piece['name']}"
-                    if piece.get("color"):
-                        line += f" ({piece['color']})"
-                    st.write(line)
+    outfit_examples = item.get("outfit_example") or []
+    if outfit_examples:
+        with st.expander("내 옷장과 매치하기"):
+            for idx, outfit in enumerate(outfit_examples, start=1):
+                st.markdown(f"**코디 아이디어 #{idx}**")
+                for piece in outfit:
+                    if isinstance(piece, dict) and piece.get("name"):
+                        line = piece.get("category") or "아이템"
+                        line += f" | {piece['name']}"
+                        if piece.get("color"):
+                            line += f" ({piece['color']})"
+                        st.write(line)
+
+
+def _render_product_grid(items: List[Dict]) -> None:
+    if not items:
+        st.warning("추천 아이템을 찾지 못했어요")
+        return
+
+    columns = 3
+    for start in range(0, len(items), columns):
+        row_items = items[start : start + columns]
+        cols = st.columns(len(row_items))
+        for col, item in zip(cols, row_items):
+            with col:
+                _render_product_card(item)
 
 
 def main() -> None:
@@ -168,6 +209,11 @@ def main() -> None:
             "크림 데이터 포함",
             value=bool(options.get("include_kream", True)),
         )
+        refresh_static = st.checkbox(
+            "내가 등록한 상품 실시간 업데이트",
+            value=bool(options.get("refresh_static", True)),
+            help="정적 카탈로그 항목을 무신사·크림 상품 페이지에서 실시간으로 갱신합니다",
+        )
         per_category_input = st.number_input(
             "카테고리별 최대 추천 수 (0은 자동)",
             min_value=0,
@@ -182,6 +228,7 @@ def main() -> None:
                 "include_static": include_static,
                 "include_musinsa": include_musinsa,
                 "include_kream": include_kream,
+                "refresh_static": refresh_static,
                 "per_category_cap": per_category_cap,
             }
         )
@@ -269,6 +316,7 @@ def main() -> None:
             kream_limit=st.session_state.catalog_options.get("limit_total", 120),
             musinsa_cookie=st.session_state.integrations.get("musinsa_cookie") or None,
             kream_cookie=st.session_state.integrations.get("kream_cookie") or None,
+            refresh_static=st.session_state.catalog_options.get("refresh_static", False),
         )
 
         if meta.get("errors"):
@@ -307,20 +355,7 @@ def main() -> None:
         for category, tab in zip(available_categories, tabs):
             with tab:
                 items = recommended.get(category, [])
-                if not items:
-                    st.warning("이 카테고리의 추천 아이템이 아직 없어요")
-                    continue
-
-                options = [f"{item['name']} · {item['price_krw']:,}원" if item.get("price_krw") else item["name"] for item in items]
-                default_index = 0
-                selection = st.selectbox(
-                    "추천 아이템 선택",
-                    options,
-                    key=f"{category}_select",
-                    index=default_index,
-                )
-                selected_item = items[options.index(selection)]
-                _render_recommendation_detail(selected_item)
+                _render_product_grid(items)
 
 
 if __name__ == "__main__":

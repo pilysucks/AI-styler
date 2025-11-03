@@ -17,17 +17,64 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CATALOG_FILE = PROJECT_ROOT / "data" / "catalog.json"
 
 
-def _load_static_catalog() -> List[dict]:
+def _refresh_catalog_entry(
+    item: dict,
+    *,
+    musinsa_cookie: Optional[str] = None,
+    kream_cookie: Optional[str] = None,
+) -> dict:
+    url = item.get("product_url", "")
+    if not url:
+        return {}
+    try:
+        if "musinsa.com" in url:
+            return sources.fetch_musinsa_product_detail(url, cookie_header=musinsa_cookie)
+        if "kream.co.kr" in url:
+            return sources.fetch_kream_product_detail(url, cookie_header=kream_cookie)
+    except Exception as exc:  # pragma: no cover - network/parse errors handled by caller
+        raise RuntimeError(str(exc)) from exc
+    return {}
+
+
+def _load_static_catalog(
+    *,
+    refresh: bool = False,
+    musinsa_cookie: Optional[str] = None,
+    kream_cookie: Optional[str] = None,
+) -> Tuple[List[dict], List[str]]:
+    errors: List[str] = []
     if not CATALOG_FILE.exists():
-        return []
+        return [], errors
+
     with CATALOG_FILE.open("r", encoding="utf-8") as fp:
         catalog = json.load(fp)
+
     for item in catalog:
         tags = item.get("style_tags", [])
         if isinstance(tags, str):
             item["style_tags"] = [tag.strip() for tag in tags.split(",") if tag.strip()]
         item.setdefault("source", "static")
-    return catalog
+
+        if refresh:
+            try:
+                refreshed = _refresh_catalog_entry(
+                    item,
+                    musinsa_cookie=musinsa_cookie,
+                    kream_cookie=kream_cookie,
+                )
+            except RuntimeError as exc:
+                name = item.get("name") or item.get("product_url") or "정적 아이템"
+                errors.append(f"{name} 실시간 업데이트 실패: {exc}")
+            else:
+                for key, value in refreshed.items():
+                    if value is None:
+                        continue
+                    if key == "style_tags" and not value:
+                        continue
+                    item[key] = value
+                item.setdefault("source", refreshed.get("source", item.get("source", "static")))
+
+    return catalog, errors
 
 
 def _deduplicate(items: Iterable[dict]) -> List[dict]:
@@ -52,6 +99,7 @@ def load_catalog(
     musinsa_cookie: Optional[str] = None,
     kream_cookie: Optional[str] = None,
     include_meta: bool = False,
+    refresh_static: bool = False,
 ) -> List[dict] | Tuple[List[dict], List[str]]:
     """Load catalog entries from static data and external providers."""
 
@@ -60,7 +108,13 @@ def load_catalog(
 
     if include_static:
         try:
-            aggregated.extend(_load_static_catalog())
+            static_items, static_errors = _load_static_catalog(
+                refresh=refresh_static,
+                musinsa_cookie=musinsa_cookie,
+                kream_cookie=kream_cookie,
+            )
+            aggregated.extend(static_items)
+            errors.extend(static_errors)
         except Exception as exc:  # pragma: no cover - defensive guard
             logger.warning("Failed to load static catalog: %s", exc)
             errors.append(f"정적 카탈로그 로드 실패: {exc}")

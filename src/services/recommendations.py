@@ -269,6 +269,7 @@ def wishlist_suggestions(
     kream_limit: int | None = None,
     musinsa_cookie: str | None = None,
     kream_cookie: str | None = None,
+    refresh_static: bool = False,
 ) -> Tuple[Dict[str, List[dict]], Dict[str, object]]:
     """Recommend new items the user can consider purchasing.
 
@@ -290,6 +291,7 @@ def wishlist_suggestions(
         musinsa_cookie=musinsa_cookie,
         kream_cookie=kream_cookie,
         include_meta=True,
+        refresh_static=refresh_static,
     )
 
     catalog: List[dict] = catalog_data if isinstance(catalog_data, list) else []

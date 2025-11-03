@@ -8,6 +8,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -122,6 +123,32 @@ def _deduplicate(items: Iterable[dict]) -> List[dict]:
         seen.add(key)
         unique.append(item)
     return unique
+
+
+def _extract_meta_content(soup, key: str) -> Optional[str]:
+    tag = soup.find("meta", attrs={"property": key}) or soup.find("meta", attrs={"name": key})
+    if tag and tag.get("content"):
+        return tag["content"].strip()
+    return None
+
+
+def _normalise_url(url: Optional[str]) -> Optional[str]:
+    if not url:
+        return None
+    if url.startswith("//"):
+        return f"https:{url}"
+    return url
+
+
+def _iter_nodes(node):
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            yield current
+            stack.extend(current.values())
+        elif isinstance(current, list):
+            stack.extend(current)
 
 
 def fetch_musinsa_catalog(
@@ -359,6 +386,137 @@ def fetch_kream_catalog(
     return _deduplicate(collected)[:limit]
 
 
+def fetch_musinsa_product_detail(
+    product_url: str,
+    *,
+    cookie_header: Optional[str] = None,
+) -> dict:
+    session = _create_session(cookie_header)
+    response = session.get(product_url, timeout=12)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    name = _extract_meta_content(soup, "og:title") or _extract_meta_content(soup, "twitter:title")
+    image_url = _extract_meta_content(soup, "og:image") or _extract_meta_content(soup, "twitter:image")
+    price_raw = (
+        _extract_meta_content(soup, "product:price:amount")
+        or _extract_meta_content(soup, "og:price:amount")
+        or _extract_meta_content(soup, "twitter:data1")
+    )
+
+    if not price_raw:
+        price_node = soup.select_one("span#goods_price") or soup.select_one("span.final_price")
+        price_raw = price_node.get_text() if price_node else None
+
+    price = _safe_int(price_raw)
+    description = _extract_meta_content(soup, "og:description")
+
+    detail = {
+        "name": _clean_text(name) if name else None,
+        "image_url": _normalise_url(image_url),
+        "price_krw": price,
+        "description": description,
+        "product_url": product_url,
+        "source": "musinsa",
+    }
+
+    return {key: value for key, value in detail.items() if value is not None}
+
+
+def fetch_kream_product_detail(
+    product_url: str,
+    *,
+    cookie_header: Optional[str] = None,
+) -> dict:
+    session = _create_session(cookie_header)
+    response = session.get(product_url, timeout=12)
+    response.raise_for_status()
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    script_tag = soup.find("script", id="__NEXT_DATA__")
+    if not script_tag or not script_tag.string:
+        raise ValueError("KREAM 상품 페이지에서 데이터 스크립트를 찾지 못했습니다")
+
+    try:
+        data = json.loads(script_tag.string)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"KREAM 상품 데이터를 파싱하지 못했습니다: {exc}") from exc
+
+    parsed_path = urlparse(product_url).path.rstrip("/")
+    candidate = None
+    fallback = None
+
+    for node in _iter_nodes(data):
+        url_value = node.get("permalink") or node.get("url")
+        if isinstance(url_value, str):
+            node_path = urlparse(url_value).path.rstrip("/")
+            if not url_value.startswith("http"):
+                node_path = ("/" + url_value.lstrip("/")) if url_value else node_path
+            if node_path == parsed_path:
+                candidate = node
+                break
+
+        if fallback is None and any(
+            key in node for key in ("lowest_ask", "price", "original_price", "market_price", "buy_now_price")
+        ) and (node.get("name") or node.get("translated_name")):
+            fallback = node
+
+    target = candidate or fallback
+    if not target:
+        raise ValueError("KREAM 상품 세부 정보를 찾지 못했습니다")
+
+    name = target.get("translated_name") or target.get("name") or target.get("title")
+    name = _clean_text(name)
+
+    price_candidates = [
+        target.get("lowest_ask"),
+        target.get("price"),
+        target.get("original_price"),
+        target.get("market_price"),
+        target.get("buy_now_price"),
+    ]
+    price = None
+    for value in price_candidates:
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            value = value.get("amount") or value.get("value")
+        if isinstance(value, (list, tuple)):
+            value = value[0] if value else None
+        parsed = _safe_int(str(value)) if value is not None else None
+        if parsed is not None:
+            price = parsed
+            break
+
+    image_url = target.get("image_url") or target.get("thumbnail_url") or target.get("image")
+    image_url = _normalise_url(image_url)
+    if image_url and image_url.startswith("/"):
+        image_url = f"https://kream.co.kr{image_url}"
+
+    brand = None
+    for key in ("brand_ko_name", "brand_name", "brand"):
+        value = target.get(key)
+        if isinstance(value, str) and value.strip():
+            brand = value.strip()
+            break
+
+    tags: List[str] = []
+    if brand:
+        tags.append(brand)
+
+    detail = {
+        "name": name,
+        "image_url": image_url,
+        "price_krw": price,
+        "style_tags": tags,
+        "product_url": product_url,
+        "source": "kream",
+    }
+
+    return {key: value for key, value in detail.items() if value is not None}
+
+
 def fetch_combined_catalog(
     *,
     musinsa_limit: int = 120,
@@ -379,6 +537,7 @@ def fetch_combined_catalog(
 
     combined = list(musinsa_items) + list(kream_items)
     return _deduplicate(combined)
+
 
 
 
