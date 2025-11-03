@@ -26,6 +26,19 @@ def _init_state() -> None:
             "season": [],
             "budget": 20,
         }
+    if "catalog_options" not in st.session_state:
+        st.session_state.catalog_options = {
+            "limit_total": 120,
+            "include_static": True,
+            "include_musinsa": True,
+            "include_kream": True,
+            "per_category_cap": None,
+        }
+    if "integrations" not in st.session_state:
+        st.session_state.integrations = {
+            "musinsa_cookie": "",
+            "kream_cookie": "",
+        }
 
 
 def _refresh_inventory() -> None:
@@ -132,6 +145,70 @@ def main() -> None:
         if st.button("인벤토리 새로고침"):
             _refresh_inventory()
 
+        st.divider()
+        st.header("추천 데이터 설정")
+        options = st.session_state.catalog_options
+        limit_total = st.slider(
+            "추천 아이템 목표 수 (전체)",
+            min_value=20,
+            max_value=240,
+            step=10,
+            value=int(options.get("limit_total", 120)),
+            help="무신사·크림 데이터를 합쳐 최소 이 숫자 이상 노출하도록 시도해요.",
+        )
+        include_static = st.checkbox(
+            "로컬 카탈로그 포함",
+            value=bool(options.get("include_static", True)),
+        )
+        include_musinsa = st.checkbox(
+            "무신사 데이터 포함",
+            value=bool(options.get("include_musinsa", True)),
+        )
+        include_kream = st.checkbox(
+            "크림 데이터 포함",
+            value=bool(options.get("include_kream", True)),
+        )
+        per_category_input = st.number_input(
+            "카테고리별 최대 추천 수 (0은 자동)",
+            min_value=0,
+            max_value=240,
+            value=int(options.get("per_category_cap") or 0),
+            step=5,
+        )
+        per_category_cap = per_category_input or None
+        st.session_state.catalog_options.update(
+            {
+                "limit_total": limit_total,
+                "include_static": include_static,
+                "include_musinsa": include_musinsa,
+                "include_kream": include_kream,
+                "per_category_cap": per_category_cap,
+            }
+        )
+
+        with st.expander("계정 연동 (선택)"):
+            st.caption(
+                "브라우저에서 복사한 세션 쿠키를 입력하면 개인화된 상품과 장바구니 기반 추천까지 확장할 수 있어요."
+            )
+            musinsa_cookie = st.text_input(
+                "무신사 세션 쿠키",
+                value=st.session_state.integrations.get("musinsa_cookie", ""),
+                type="password",
+                help="예: 'MUSINSA_SESSION=...' 형식 전체를 붙여넣으세요.",
+            )
+            kream_cookie = st.text_input(
+                "크림 세션 쿠키",
+                value=st.session_state.integrations.get("kream_cookie", ""),
+                type="password",
+                help="예: 'krem_session=...' 형식 전체를 붙여넣으세요.",
+            )
+            st.session_state.integrations.update(
+                {
+                    "musinsa_cookie": musinsa_cookie.strip(),
+                    "kream_cookie": kream_cookie.strip(),
+                }
+            )
+
     tab1, tab2, tab3 = st.tabs(["나의 옷장", "보유 코디", "추천 아이템"])
 
     with tab1:
@@ -180,13 +257,48 @@ def main() -> None:
 
     with tab3:
         st.header("신규 아이템 추천")
-        recommended = recommendations.wishlist_suggestions(
+        recommended, meta = recommendations.wishlist_suggestions(
             st.session_state.inventory_df,
             st.session_state.profile,
+            limit_total=st.session_state.catalog_options.get("limit_total", 120),
+            per_category_cap=st.session_state.catalog_options.get("per_category_cap"),
+            include_static=st.session_state.catalog_options.get("include_static", True),
+            include_musinsa=st.session_state.catalog_options.get("include_musinsa", True),
+            include_kream=st.session_state.catalog_options.get("include_kream", True),
+            musinsa_limit=st.session_state.catalog_options.get("limit_total", 120),
+            kream_limit=st.session_state.catalog_options.get("limit_total", 120),
+            musinsa_cookie=st.session_state.integrations.get("musinsa_cookie") or None,
+            kream_cookie=st.session_state.integrations.get("kream_cookie") or None,
         )
 
-        ordered_categories = ["상의", "아우터", "바지", "신발", "모자", "원피스", "스커트", "액세서리", "기타"]
+        if meta.get("errors"):
+            for error_msg in meta["errors"]:
+                st.warning(error_msg)
+
+        cap_value = meta.get("per_category_cap")
+        cap_display = cap_value if cap_value else "자동"
+        st.caption(
+            f"후보 {meta.get('total_candidates', 0)}개 중 {meta.get('total_selected', 0)}개를 노출 중 (카테고리별 최대 {cap_display}개)"
+        )
+        if meta.get("source_counts"):
+            source_summary = ", ".join(f"{key}: {value}개" for key, value in meta["source_counts"].items())
+            st.caption(f"데이터 소스별 수집량 · {source_summary}")
+
+        ordered_categories = [
+            "상의",
+            "아우터",
+            "바지",
+            "원피스",
+            "스커트",
+            "신발",
+            "모자",
+            "액세서리",
+            "가방",
+            "기타",
+        ]
         available_categories = [cat for cat in ordered_categories if cat in recommended]
+        extra_categories = [cat for cat in recommended.keys() if cat not in ordered_categories]
+        available_categories.extend(extra_categories)
         if not available_categories:
             st.info("무신사/크림 카탈로그 기반 추천을 준비 중이에요")
             return

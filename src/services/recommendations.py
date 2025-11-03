@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import itertools
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -259,20 +259,54 @@ def _build_catalog_outfit(
 def wishlist_suggestions(
     inventory_df: pd.DataFrame,
     profile: dict,
-    limit_per_category: int = 3,
-) -> Dict[str, List[dict]]:
-    """Recommend new items the user can consider purchasing."""
+    *,
+    limit_total: int = 120,
+    per_category_cap: int | None = None,
+    include_static: bool = True,
+    include_musinsa: bool = True,
+    include_kream: bool = True,
+    musinsa_limit: int | None = None,
+    kream_limit: int | None = None,
+    musinsa_cookie: str | None = None,
+    kream_cookie: str | None = None,
+) -> Tuple[Dict[str, List[dict]], Dict[str, object]]:
+    """Recommend new items the user can consider purchasing.
 
-    catalog = marketplace.load_catalog()
+    Returns a tuple ``(recommendations, meta)`` where ``meta`` contains additional
+    diagnostic information such as fetch errors and source counts.
+    """
+
+    limit_total = max(int(limit_total), 1)
+
+    musinsa_fetch_limit = musinsa_limit if musinsa_limit is not None else limit_total
+    kream_fetch_limit = kream_limit if kream_limit is not None else limit_total
+
+    catalog_data, errors = marketplace.load_catalog(
+        include_static=include_static,
+        include_musinsa=include_musinsa,
+        include_kream=include_kream,
+        musinsa_limit=musinsa_fetch_limit,
+        kream_limit=kream_fetch_limit,
+        musinsa_cookie=musinsa_cookie,
+        kream_cookie=kream_cookie,
+        include_meta=True,
+    )
+
+    catalog: List[dict] = catalog_data if isinstance(catalog_data, list) else []
+
     style_pref = profile.get("style_preferences", [])
     seasons = profile.get("season", [])
 
     scored_items = []
+    source_counts: Dict[str, int] = {}
     for item in catalog:
+        source = item.get("source", "static")
+        source_counts[source] = source_counts.get(source, 0) + 1
+
         style_score = _style_alignment(item.get("style_tags", []), style_pref)
         gap_score = _category_gap_score(inventory_df, item.get("category", ""))
         season_score = _season_alignment(item.get("season", []), seasons)
-        budget_score = _budget_score(int(item.get("price_krw", 0)), profile.get("budget"))
+        budget_score = _budget_score(int(item.get("price_krw", 0) or 0), profile.get("budget"))
         total_score = 0.4 * style_score + 0.3 * gap_score + 0.2 * season_score + 0.1 * budget_score
 
         scored_items.append(
@@ -291,11 +325,19 @@ def wishlist_suggestions(
         category = entry["item"].get("category", "기타")
         buckets.setdefault(category, []).append(entry)
 
+    if per_category_cap is None and buckets:
+        per_category_cap = max(10, -(-limit_total // len(buckets)))  # ceiling division
+    elif per_category_cap is None:
+        per_category_cap = limit_total
+
     recommendations: Dict[str, List[dict]] = {}
+    total_selected = 0
     for category, items in buckets.items():
-        top_items = sorted(items, key=lambda x: x["score"], reverse=True)[:limit_per_category]
+        ordered = sorted(items, key=lambda x: x["score"], reverse=True)
+        selected = ordered[:per_category_cap]
+        total_selected += len(selected)
         recommendations[category] = []
-        for entry in top_items:
+        for entry in selected:
             catalog_item = entry["item"]
             outfits = _build_catalog_outfit(catalog_item, inventory_df, profile)
             recommendations[category].append(
@@ -309,10 +351,19 @@ def wishlist_suggestions(
                     "style_tags": catalog_item.get("style_tags", []),
                     "season": catalog_item.get("season", []),
                     "outfit_example": outfits,
+                    "source": catalog_item.get("source", "static"),
                 }
             )
 
-    return recommendations
+    meta = {
+        "errors": errors,
+        "source_counts": source_counts,
+        "total_candidates": len(scored_items),
+        "total_selected": total_selected,
+        "per_category_cap": per_category_cap,
+    }
+
+    return recommendations, meta
 
 
 def _build_reason(entry: dict) -> str:
