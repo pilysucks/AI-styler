@@ -237,6 +237,16 @@ def main() -> None:
             st.caption(
                 "브라우저에서 복사한 세션 쿠키를 입력하면 개인화된 상품과 장바구니 기반 추천까지 확장할 수 있어요."
             )
+            st.markdown(
+                """
+                **무신사·크림 쿠키 입력 방법**
+                1. Chrome(또는 Edge)에서 해당 사이트에 로그인한 뒤 상품 페이지를 엽니다.
+                2. `F12` 키를 눌러 개발자 도구를 열고 **Application → Storage → Cookies** 메뉴로 이동합니다.
+                3. 도메인을 선택한 후 `MUSINSA_SESSION`(무신사) 또는 `krem_session`(크림) 항목의 전체 값을 복사합니다.
+                4. 아래 입력창에 붙여넣고 `Enter`를 눌러 저장하세요. 쿠키는 로컬 세션 상태에만 보관됩니다.
+                """
+            )
+            st.info("사설 네트워크(VPN) 사용 시 국내 서버로 접속해야 정상 동작할 수 있어요.")
             musinsa_cookie = st.text_input(
                 "무신사 세션 쿠키",
                 value=st.session_state.integrations.get("musinsa_cookie", ""),
@@ -322,6 +332,17 @@ def main() -> None:
         if meta.get("errors"):
             for error_msg in meta["errors"]:
                 st.warning(error_msg)
+
+            musinsa_failure = any("무신사" in msg for msg in meta["errors"])
+            kream_failure = any("KREAM" in msg or "크림" in msg for msg in meta["errors"])
+
+            if musinsa_failure and st.session_state.catalog_options.get("include_musinsa"):
+                st.session_state.catalog_options["include_musinsa"] = False
+                st.info("무신사 연결이 불안정하여 자동으로 비활성화했습니다. 네트워크를 확인한 후 사이드바에서 다시 켤 수 있어요.")
+
+            if kream_failure and st.session_state.catalog_options.get("include_kream"):
+                st.session_state.catalog_options["include_kream"] = False
+                st.info("크림 연결이 불안정하여 자동으로 비활성화했습니다. 네트워크를 확인한 후 사이드바에서 다시 켤 수 있어요.")
 
         cap_value = meta.get("per_category_cap")
         cap_display = cap_value if cap_value else "자동"

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import socket
 import time
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -125,6 +126,13 @@ def _deduplicate(items: Iterable[dict]) -> List[dict]:
     return unique
 
 
+def _ensure_host_resolvable(host: str) -> None:
+    try:
+        socket.gethostbyname(host)
+    except socket.gaierror as exc:
+        raise RuntimeError(f"{host} 도메인을 해석할 수 없습니다: {exc}") from exc
+
+
 def _extract_meta_content(soup, key: str) -> Optional[str]:
     tag = soup.find("meta", attrs={"property": key}) or soup.find("meta", attrs={"name": key})
     if tag and tag.get("content"):
@@ -168,6 +176,8 @@ def fetch_musinsa_catalog(
         delay: Seconds to sleep between page requests to be polite.
     """
 
+    _ensure_host_resolvable("search.musinsa.com")
+
     default_categories = [
         ("001", "상의"),
         ("002", "바지"),
@@ -202,6 +212,10 @@ def fetch_musinsa_catalog(
                 response.raise_for_status()
             except requests.RequestException as exc:
                 logger.warning("Musinsa request failed for %s page %s: %s", category_code, page, exc)
+                if isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code >= 500:
+                    raise RuntimeError("무신사 서버에서 오류(500)를 반환했습니다. 잠시 후 다시 시도해 주세요.") from exc
+                if isinstance(exc, requests.ConnectionError) or "NameResolutionError" in str(exc):
+                    raise RuntimeError("무신사 서버와 연결할 수 없습니다. 네트워크 상태 또는 VPN을 확인해 주세요.") from exc
                 break
 
             soup = BeautifulSoup(response.text, "html.parser")
@@ -296,6 +310,8 @@ def fetch_kream_catalog(
 ) -> List[dict]:
     """Fetch product metadata from KREAM search pages using embedded Next.js data."""
 
+    _ensure_host_resolvable("kream.co.kr")
+
     default_paths = [
         ("https://kream.co.kr/search?category_id=18&sort=popular", "신발"),
         ("https://kream.co.kr/search?category_id=33&sort=popular", "상의"),
@@ -314,6 +330,10 @@ def fetch_kream_catalog(
             response.raise_for_status()
         except requests.RequestException as exc:
             logger.warning("KREAM request failed for %s: %s", url, exc)
+            if isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code >= 500:
+                raise RuntimeError("KREAM 서버에서 오류(500)를 반환했습니다. 잠시 후 다시 시도해 주세요.") from exc
+            if isinstance(exc, requests.ConnectionError) or "NameResolutionError" in str(exc):
+                raise RuntimeError("KREAM 서버와 연결할 수 없습니다. 네트워크 상태 또는 VPN을 확인해 주세요.") from exc
             continue
 
         soup = BeautifulSoup(response.text, "html.parser")
@@ -391,6 +411,8 @@ def fetch_musinsa_product_detail(
     *,
     cookie_header: Optional[str] = None,
 ) -> dict:
+    _ensure_host_resolvable("www.musinsa.com")
+
     session = _create_session(cookie_header)
     response = session.get(product_url, timeout=12)
     response.raise_for_status()
@@ -429,6 +451,8 @@ def fetch_kream_product_detail(
     *,
     cookie_header: Optional[str] = None,
 ) -> dict:
+    _ensure_host_resolvable("kream.co.kr")
+
     session = _create_session(cookie_header)
     response = session.get(product_url, timeout=12)
     response.raise_for_status()
